@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Linq;
 using System.Collections.Generic;
@@ -7,31 +7,84 @@ namespace hashcode2021
 {
     class Program
     {
-        static string[] inputFiles = {
-            @"c:\temp\hashcode\a.txt",
-            @"c:\temp\hashcode\b.txt",
-            @"c:\temp\hashcode\c.txt",
-            @"c:\temp\hashcode\d.txt",
-            @"c:\temp\hashcode\e.txt",
-            @"c:\temp\hashcode\f.txt"
+        // Per-input optimized-parameter configuration (from README "+ Optimize Params").
+        // CycleDivider: argument to OptimizeCycleDuration (B=64, C=105, F=16, default 50).
+        // UseOrder4:    use OptimizeGreenLightOrder4 instead of OptimizeGreenLightOrder (D).
+        // UseIncomingCarsDuration: use OptimizeCycleDurationByNumberOfIncomingCars instead
+        //                          of OptimizeCycleDuration (E).
+        class InputConfig
+        {
+            public string FileName;
+            public int CycleDivider = 50;
+            public bool UseOrder3 = false;
+            public bool UseOrder4 = false;
+            public bool UseIncomingCarsDuration = false;
+            public bool UseHillClimb = true;
+        }
+
+        static InputConfig[] inputs = {           
+            new InputConfig { FileName = "/home/digitron/Documents/GitHub/google-hashcode-archive/traffic_signaling/hashcode_2021_qualification_round.in/a_example.txt" },
+            new InputConfig { FileName = "/home/digitron/Documents/GitHub/google-hashcode-archive/traffic_signaling/hashcode_2021_qualification_round.in/b_ocean.txt", CycleDivider = 64 },
+            new InputConfig { FileName = "/home/digitron/Documents/GitHub/google-hashcode-archive/traffic_signaling/hashcode_2021_qualification_round.in/c_checkmate.txt", CycleDivider = 105 },
+            new InputConfig { FileName = "/home/digitron/Documents/GitHub/google-hashcode-archive/traffic_signaling/hashcode_2021_qualification_round.in/d_daily_commute.txt", UseOrder4 = true },
+            new InputConfig { FileName = "/home/digitron/Documents/GitHub/google-hashcode-archive/traffic_signaling/hashcode_2021_qualification_round.in/e_etoile.txt", UseIncomingCarsDuration = true },
+            new InputConfig { FileName = "/home/digitron/Documents/GitHub/google-hashcode-archive/traffic_signaling/hashcode_2021_qualification_round.in/f_forever_jammed.txt", CycleDivider = 16, UseOrder3 = true },
         };
+        
+        // Per-input hill-climb time limit in minutes. Override with HILLCLIMB_MINUTES env var.
+        static double hillClimbMinutes = 10.0;
 
         static void Main(string[] args)
         {
             DateTime startTime = DateTime.Now;
 
-            foreach (string fileName in inputFiles)
+            string envMinutes = Environment.GetEnvironmentVariable("HILLCLIMB_MINUTES");
+            if (!string.IsNullOrEmpty(envMinutes) && double.TryParse(envMinutes, out double m))
+                hillClimbMinutes = m;
+
+            // If file paths are passed on the command line, solve only those (with their
+            // configured params if known, else defaults). Otherwise solve all six.
+            IEnumerable<InputConfig> toSolve = inputs;
+            if (args.Length > 0)
             {
+                toSolve = args.Select(a =>
+                {
+                    InputConfig known = inputs.FirstOrDefault(c =>
+                        Path.GetFileName(c.FileName).Equals(Path.GetFileName(a), StringComparison.OrdinalIgnoreCase));
+                    if (known != null)
+                        return new InputConfig
+                        {
+                            FileName = a,
+                            CycleDivider = known.CycleDivider,
+                            UseOrder4 = known.UseOrder4,
+                            UseIncomingCarsDuration = known.UseIncomingCarsDuration
+                        };
+                    return new InputConfig { FileName = a };
+                });
+            }
+
+            foreach (InputConfig config in toSolve)
+            {
+                if (!File.Exists(config.FileName))
+                {
+                    Console.WriteLine("Skipping missing input: {0}", config.FileName);
+                    continue;
+                }
                 DateTime solveStartTime = DateTime.Now;
-                Solve(fileName);
+                Solve(config);
                 Console.WriteLine("Solve time: {0}", new TimeSpan(DateTime.Now.Ticks - solveStartTime.Ticks));
             }
 
             Console.WriteLine("Runtime: {0}", new TimeSpan(DateTime.Now.Ticks - startTime.Ticks));
         }
 
-        static void Solve(string fileName)
+        static void Solve(InputConfig config)
         {
+            string fileName = config.FileName;
+
+            // Cap the ENTIRE per-input solve (base + hill-climb) at the time limit.
+            hillClimbDeadline = DateTime.Now.AddMinutes(hillClimbMinutes);
+
             Problem problem = Problem.LoadProblem(fileName);
             Console.WriteLine("*****************");
             Console.WriteLine("{0}, Duration: {1}, Intersections: {2}, Bonus Per Car: {3}, Streets: {4}, Cars: {5}",
@@ -48,23 +101,37 @@ namespace hashcode2021
             InitBasicSolution(problem, solution);
 
             // Run simulation and try to change the order of green lights to minimize blocking
-            // D - use OptimizeGreenLightOrder4
-            problem.OptimizeGreenLightOrder(solution, new HashSet<int>());
-            
-            // E - This works better
-            //solution = OptimizeCycleDurationByNumberOfIncomingCars(problem, solution);
+            // D - use OptimizeGreenLightOrder4; F - OptimizeGreenLightOrder3
+            if (config.UseOrder4)
+                problem.OptimizeGreenLightOrder4(solution, new HashSet<int>());
+            else if (config.UseOrder3)
+                problem.OptimizeGreenLightOrder3(solution, new HashSet<int>());
+            else
+                problem.OptimizeGreenLightOrder(solution, new HashSet<int>());
 
-            // Add cycle time for the top blocked cars.
-            // B - 64, C - 105
-            // F - 16 With OptimizeGreenLightOrder3 is a bit higher
-            solution = OptimizeCycleDuration(problem, solution, 50);
+            if (config.UseIncomingCarsDuration)
+            {
+                // E - This works better
+                solution = OptimizeCycleDurationByNumberOfIncomingCars(problem, solution);
+            }
+            else
+            {
+                // Add cycle time for the top blocked cars.
+                // B - 64, C - 105, F - 16, default 50
+                solution = OptimizeCycleDuration(problem, solution, config.CycleDivider);
+            }
 
             // Remove streets where the only car that passes is a car that didn't finish from
             // the green light cycle
             solution = OptimizeCycleClearStreetsCarsDidntFinish(problem, solution);
 
-            // Hill-Climbing
-            //solution = OptimizeBruteForce(problem, solution, int.MaxValue);
+            // Hill-Climbing (uses the per-input solve deadline set at the top of Solve)
+            if (config.UseHillClimb && !HillClimbTimeUp())
+            {
+                Console.WriteLine("Hill-climb start (solve capped at {0} min total)...", hillClimbMinutes);
+                solution = OptimizeBruteForce(problem, solution, int.MaxValue);
+            }
+            hillClimbDeadline = DateTime.MaxValue;
 
             // Simulate solution
             int score = problem.RunSimulationLite(solution);
@@ -103,6 +170,14 @@ namespace hashcode2021
             }
         }
 
+        // Deadline for the hill-climb. DateTime.MaxValue means no limit.
+        private static DateTime hillClimbDeadline = DateTime.MaxValue;
+
+        private static bool HillClimbTimeUp()
+        {
+            return DateTime.Now >= hillClimbDeadline;
+        }
+
         private static Solution OptimizeBruteForce(Problem problem, Solution solution, int maxPos)
         {
             int lastScore = problem.RunSimulationLite(solution);
@@ -114,9 +189,11 @@ namespace hashcode2021
             {
                 // For D - comment everything but this. Too slow.
                 solution = OptimizeGreenLightOrderBruteForceSwap(problem, solution, maxPos);
+                if (HillClimbTimeUp()) break;
 
                 // Minimal improvement, very slow. Comment if time is limited.
                 solution = OptimizeGreenLightOrderBruteForceMove(problem, solution, maxPos);
+                if (HillClimbTimeUp()) break;
 
                 // Tested only with 3 & 10. 
                 // For E & F - 3 performed better
@@ -124,9 +201,16 @@ namespace hashcode2021
                 for (int delta = 1; delta <= 3; delta++)
                 {
                     solution = OptimizeGreenLightBruteForceDeltaDuration(problem, solution, maxPos, delta);
+                    if (HillClimbTimeUp()) break;
                     solution = OptimizeGreenLightBruteForceDeltaDuration(problem, solution, maxPos, -delta);
+                    if (HillClimbTimeUp()) break;
                 }
-                
+                if (HillClimbTimeUp())
+                {
+                    Console.WriteLine("Hill-climb time limit reached, stopping.");
+                    break;
+                }
+
                 int score = problem.RunSimulationLite(solution);
                 if (lastScore == score)
                     break;
@@ -146,10 +230,12 @@ namespace hashcode2021
 
             for (int i = 0; i < solution.Intersections.Length; i++)
             {
+                if (HillClimbTimeUp()) return solution;
                 int loopPos = Math.Min(maxPos, solution.Intersections[i].GreenLigths.Count);
 
                 for (int pos = 0; pos < loopPos; pos++)
                 {
+                    if (HillClimbTimeUp()) return solution;
                     Solution newSolution = (Solution)solution.Clone();
                     newSolution.Intersections[i].GreenLigths[pos].Duration += delta;
                     if (newSolution.Intersections[i].GreenLigths[pos].Duration < 0)
@@ -175,11 +261,13 @@ namespace hashcode2021
 
             for (int i = 0; i < solution.Intersections.Length; i++)
             {
+                if (HillClimbTimeUp()) return solution;
                 int loopPos = Math.Min(maxPos, solution.Intersections[i].GreenLigths.Count);
 
                 for (int pos2 = 1; pos2 < loopPos; pos2++)
                     for (int pos1 = 0; pos1 < pos2; pos1++)
                     {
+                        if (HillClimbTimeUp()) return solution;
                         Solution newSolution = (Solution)solution.Clone();
                         Utils.SwapItems(newSolution.Intersections[i].GreenLigths, pos1, pos2);
 
@@ -202,11 +290,13 @@ namespace hashcode2021
 
             for (int i = 0; i < solution.Intersections.Length; i++)
             {
+                if (HillClimbTimeUp()) return solution;
                 int loopPos = Math.Min(maxPos, solution.Intersections[i].GreenLigths.Count);
 
                 for (int pos2 = 0; pos2 < loopPos; pos2++)
                     for (int pos1 = 0; pos1 < loopPos; pos1++)
                     {
+                        if (HillClimbTimeUp()) return solution;
                         if (pos1 == pos2)
                             continue;
 
